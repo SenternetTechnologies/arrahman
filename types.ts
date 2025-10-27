@@ -1,4 +1,3 @@
-
 export interface Site {
     SiteID: string;
     SiteName: string;
@@ -112,4 +111,10 @@ export type ModalType =
     | 'add-daily-material'
     | 'update-salary' 
     | 'upload-file'
+    | 'ai-analysis'
     | null;
+
+export interface ChatMessage {
+  role: 'user' | 'model';
+  parts: { text: string }[];
+}

@@ -1,12 +1,18 @@
-
 import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
+import { GoogleGenAI } from '@google/genai';
 import * as api from './services/api';
-import type { Site, Worker, Material, Page, HomeTab, WorkerSubTab, MaterialSubTab, SiteDetailTab, ModalType, SiteDetailsData, DashboardData, TodayWorker, OverallMaterialLog } from './types';
-import { HomeIcon, ChartIcon, AddIcon, BackIcon, CheckCircleIcon, LocationIcon, UploadCloudIcon } from './components/Icons';
+import type { Site, Worker, Material, Page, HomeTab, WorkerSubTab, MaterialSubTab, SiteDetailTab, ModalType, SiteDetailsData, DashboardData, TodayWorker, OverallMaterialLog, ChatMessage, DailyLog } from './types';
+import { HomeIcon, ChartIcon, AddIcon, BackIcon, CheckCircleIcon, LocationIcon, UploadCloudIcon, ChatIcon, SparklesIcon, SendIcon, CloseIcon } from './components/Icons';
 
 // --- UTILITY FUNCTIONS ---
 const formatCurrency = (amount: number) => new Intl.NumberFormat('en-IN', { style: 'currency', currency: 'INR' }).format(amount);
 const getTodayDate = () => new Date().toISOString().split('T')[0];
+
+const API_KEY = process.env.API_KEY;
+if (!API_KEY) {
+  throw new Error("API_KEY environment variable not set");
+}
+const ai = new GoogleGenAI({ apiKey: API_KEY });
 
 // --- APP COMPONENT ---
 export default function App() {
@@ -31,6 +37,12 @@ export default function App() {
     const [workerSubTab, setWorkerSubTab] = useState<WorkerSubTab>('today');
     const [materialSubTab, setMaterialSubTab] = useState<MaterialSubTab>('log');
     const [siteDetailTab, setSiteDetailTab] = useState<SiteDetailTab>('log');
+
+    // AI State
+    const [isChatOpen, setChatOpen] = useState(false);
+    const [chatHistory, setChatHistory] = useState<ChatMessage[]>([]);
+    const [isAiLoading, setAiLoading] = useState(false);
+    const [aiAnalysisResult, setAiAnalysisResult] = useState<string | null>(null);
 
     // --- DATA FETCHING ---
     const showToast = (message: string, type: 'success' | 'error' = 'success') => {
@@ -102,6 +114,52 @@ export default function App() {
             setSiteDetails(null);
         }
     };
+    
+    // --- AI Handlers ---
+    const handleAiChat = async (message: string) => {
+        setAiLoading(true);
+        const userMessage: ChatMessage = { role: 'user', parts: [{ text: message }] };
+        const currentHistory = [...chatHistory, userMessage];
+        setChatHistory(currentHistory);
+
+        try {
+            const chat = ai.chats.create({ model: 'gemini-2.5-flash', history: chatHistory });
+            const response = await chat.sendMessage({ message });
+            
+            const modelMessage: ChatMessage = { role: 'model', parts: [{ text: response.text }] };
+            setChatHistory([...currentHistory, modelMessage]);
+        } catch (error) {
+            console.error("AI chat error:", error);
+            const errorMessage: ChatMessage = { role: 'model', parts: [{ text: "Sorry, I couldn't get a response. Please try again." }] };
+            setChatHistory([...currentHistory, errorMessage]);
+        } finally {
+            setAiLoading(false);
+        }
+    };
+
+    const handleAnalyzeExpenses = async () => {
+        if (!dashboardData) {
+            showToast('Dashboard data not available for analysis.', 'error');
+            return;
+        }
+        setAiLoading(true);
+        setActiveModal('ai-analysis');
+        try {
+            const prompt = `You are a construction project financial analyst. Based on the following data for Ar-Rahman Construction, provide a brief analysis and suggest potential areas for cost savings in markdown format. Data: Today's Expense: ${formatCurrency(dashboardData.todayExpense)}, This Month's Expense: ${formatCurrency(dashboardData.monthExpense)}, Active Workers Today: ${dashboardData.todayWorkers}, Material Items Used Today: ${dashboardData.todayMaterials}, Online Sites: ${dashboardData.onlineSites}.`;
+            
+            const response = await ai.models.generateContent({
+                model: 'gemini-2.5-pro',
+                contents: prompt,
+            });
+            setAiAnalysisResult(response.text);
+
+        } catch (error) {
+            console.error("Expense analysis error:", error);
+            setAiAnalysisResult("Failed to generate analysis. Please try again.");
+        } finally {
+            setAiLoading(false);
+        }
+    };
 
     // --- RENDER LOGIC ---
     return (
@@ -129,12 +187,15 @@ export default function App() {
                         tab={siteDetailTab} 
                         setTab={setSiteDetailTab}
                         setActiveModal={setActiveModal}
+                        showToast={showToast}
                     />
                 )}
-                {page === 'profile' && dashboardData && <ProfilePage data={dashboardData} />}
+                {page === 'profile' && dashboardData && <ProfilePage data={dashboardData} onAnalyze={handleAnalyzeExpenses} />}
             </main>
 
             <BottomNav currentPage={page} onNavigate={handleNavigate} />
+            <ChatFab onClick={() => setChatOpen(true)} />
+            <ChatBot isOpen={isChatOpen} onClose={() => setChatOpen(false)} history={chatHistory} onSendMessage={handleAiChat} isLoading={isAiLoading} />
 
             <ModalManager 
                 activeModal={activeModal} 
@@ -144,6 +205,8 @@ export default function App() {
                 showToast={showToast}
                 workers={workers}
                 materials={materials}
+                aiAnalysisResult={aiAnalysisResult}
+                isAiLoading={isAiLoading}
             />
 
             {loading && <GlobalLoader />}
@@ -153,7 +216,6 @@ export default function App() {
 }
 
 // --- SUB-COMPONENTS ---
-// To avoid re-declaring on every App render, they are defined outside the main component.
 
 // LAYOUT
 const Header: React.FC<{ page: Page; onBack: () => void; siteName?: string }> = ({ page, onBack, siteName }) => {
@@ -201,6 +263,12 @@ const Fab: React.FC<{ onClick: () => void }> = ({ onClick }) => (
     </button>
 );
 
+const ChatFab: React.FC<{ onClick: () => void }> = ({ onClick }) => (
+    <button onClick={onClick} className="fixed bottom-20 right-24 bg-blue-600 text-white w-14 h-14 rounded-full flex items-center justify-center shadow-lg transition-transform active:scale-90 z-20">
+        <ChatIcon className="w-7 h-7" />
+    </button>
+);
+
 // UI Elements
 const GlobalLoader = () => (
     <div className="fixed inset-0 bg-white bg-opacity-80 z-50 flex items-center justify-center">
@@ -217,10 +285,6 @@ const Toast: React.FC<{ message: string; type: 'success' | 'error' }> = ({ messa
         </div>
     );
 };
-
-// ... More components to be defined here for HomePage, SiteDetailsPage, ProfilePage, and Modals ...
-// For brevity, this is a conceptual structure. The final implementation might combine these into larger component files.
-// Let's create the Pages and Modals here as well for a single-file structure approach.
 
 const HomePage: React.FC<{
     sites: Site[]; workers: Worker[]; materials: Material[];
@@ -277,12 +341,17 @@ const HomePage: React.FC<{
                                         <h3 className="text-lg font-semibold text-teal-700">{site.SiteName}</h3>
                                         <p className="text-sm text-gray-600">{site.Location}</p>
                                     </div>
-                                    <label className="inline-flex items-center cursor-pointer">
+                                    <span className={`px-2 py-1 text-xs font-medium rounded-full ${site.Status === 'Online' ? 'bg-green-100 text-green-800' : 'bg-red-100 text-red-800'}`}>
+                                        {site.Status}
+                                    </span>
+                                </div>
+                                 <div className="flex items-center justify-between pt-2">
+                                     <label className="inline-flex items-center cursor-pointer">
                                         <input type="checkbox" checked={site.Status === 'Online'} onChange={() => handleToggleStatus(site.SiteID, site.Status)} className="sr-only peer"/>
                                         <div className="relative w-11 h-6 bg-gray-200 rounded-full peer peer-focus:ring-2 peer-focus:ring-teal-300 peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-0.5 after:start-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-teal-600"></div>
                                     </label>
+                                    <button onClick={() => onViewSite(site.SiteID)} className="bg-teal-600 text-white py-2 px-4 rounded-lg font-medium transition-colors hover:bg-teal-700 text-sm">View Details</button>
                                 </div>
-                                <button onClick={() => onViewSite(site.SiteID)} className="w-full bg-teal-600 text-white py-2 px-4 rounded-lg font-medium transition-colors hover:bg-teal-700 text-sm">View Details</button>
                             </div>
                         )) : <p className="text-gray-500 col-span-full text-center">No sites found. Click '+' to add one.</p>}
                     </div>
@@ -342,10 +411,36 @@ const SiteDetailsPage: React.FC<{
     details: SiteDetailsData; workers: Worker[]; materials: Material[];
     tab: SiteDetailTab; setTab: (t: SiteDetailTab) => void;
     setActiveModal: (modal: ModalType) => void;
-}> = ({ details, workers, materials, tab, setTab, setActiveModal }) => {
+    showToast: (msg: string, type?: 'success' | 'error') => void;
+}> = ({ details, tab, setTab, setActiveModal, showToast }) => {
     const { site, logs, workerLogs, materialLogs, gallery, expenses } = details;
+    const [summary, setSummary] = useState('');
+    const [isSummaryLoading, setSummaryLoading] = useState(false);
 
-    const FileButton: React.FC<{ fileId?: string; text: string; type: string }> = ({ fileId, text, type }) => {
+    const handleSummarize = async (logsToSummarize: DailyLog[]) => {
+        if (logsToSummarize.length === 0) {
+            showToast('No logs to summarize.', 'error');
+            return;
+        }
+        setSummaryLoading(true);
+        setSummary('');
+        try {
+            const logText = logsToSummarize.map(l => `${l.Date}: ${l.LogEntry}`).join('\n');
+            const prompt = `Provide a very brief, bulleted summary of these construction site logs:\n${logText}`;
+            const response = await ai.models.generateContent({
+                model: 'gemini-2.5-flash-lite',
+                contents: prompt,
+            });
+            setSummary(response.text);
+        } catch (error) {
+            console.error("Log summary error:", error);
+            showToast('Failed to generate summary.', 'error');
+        } finally {
+            setSummaryLoading(false);
+        }
+    };
+
+    const FileButton: React.FC<{ fileId?: string; text: string; type: string }> = ({ fileId, text }) => {
         if (fileId) {
             return <a href="#" onClick={(e) => e.preventDefault()} className="bg-gray-200 text-gray-800 py-2 px-3 rounded-lg font-medium text-sm text-center">View {text}</a>;
         }
@@ -392,7 +487,18 @@ const SiteDetailsPage: React.FC<{
             <div className="mt-2">
                 <Tabs items={['Daily Log', 'Workers', 'Materials']} selected={tab.charAt(0).toUpperCase() + tab.slice(1)} onSelect={(val) => setTab(val.toLowerCase().replace(' ', '') as SiteDetailTab)} />
                 <div className="p-4 space-y-3">
-                    {tab === 'log' && <div><button onClick={() => setActiveModal('add-daily-log')} className="bg-teal-600 text-white py-2 px-4 rounded-lg font-medium text-sm mb-3">Add Log Entry</button> {logs.map(log => <div key={log.LogID} className="bg-white p-3 rounded-lg shadow-sm"><p className="font-medium text-gray-500 text-sm">{log.Date}</p><p>{log.LogEntry}</p></div>)}</div>}
+                    {tab === 'log' && (
+                        <div>
+                            <div className="flex space-x-2 mb-3">
+                                <button onClick={() => setActiveModal('add-daily-log')} className="flex-1 bg-teal-600 text-white py-2 px-4 rounded-lg font-medium text-sm">Add Log Entry</button>
+                                <button onClick={() => handleSummarize(logs)} disabled={isSummaryLoading} className="flex-1 bg-blue-600 text-white py-2 px-4 rounded-lg font-medium text-sm flex items-center justify-center disabled:bg-blue-400">
+                                    <SparklesIcon className="w-4 h-4 mr-2"/> {isSummaryLoading ? 'Summarizing...' : 'Summarize with AI'}
+                                </button>
+                            </div>
+                            {summary && <div className="bg-blue-50 border border-blue-200 text-blue-800 p-3 rounded-lg mb-3 prose prose-sm max-w-none" dangerouslySetInnerHTML={{__html: summary.replace(/\*/g, '•')}}></div>}
+                            {logs.length > 0 ? logs.map(log => <div key={log.LogID} className="bg-white p-3 rounded-lg shadow-sm"><p className="font-medium text-gray-500 text-sm">{log.Date}</p><p>{log.LogEntry}</p></div>) : <p className="text-center text-gray-500">No daily logs yet.</p>}
+                        </div>
+                    )}
                     {tab === 'workers' && <div><button onClick={() => setActiveModal('add-daily-worker')} className="bg-teal-600 text-white py-2 px-4 rounded-lg font-medium text-sm mb-3">Add Worker Entry</button> {workerLogs.map(log => <div key={log.LogID} className="bg-white p-3 rounded-lg shadow-sm flex justify-between items-center"><div><p className="font-medium">{log.WorkerName}</p><p className="text-sm text-gray-600">{log.Date}</p></div><span className={`font-medium ${log.PaidStatus ? 'text-green-600' : 'text-red-600'}`}>{log.PaidStatus ? `Paid ${formatCurrency(log.SalaryPaid)}` : 'Unpaid'}</span></div>)}</div>}
                     {tab === 'materials' && <div><button onClick={() => setActiveModal('add-daily-material')} className="bg-teal-600 text-white py-2 px-4 rounded-lg font-medium text-sm mb-3">Add Material Entry</button> {materialLogs.map(log => <div key={log.LogID} className="bg-white p-3 rounded-lg shadow-sm"><p className="font-medium">{log.MaterialName} ({log.QuantityUsed} {log.Unit})</p><p className="text-sm text-gray-600">{log.Date} - Cost: {formatCurrency(log.TotalCost)}</p></div>)}</div>}
                 </div>
@@ -401,7 +507,7 @@ const SiteDetailsPage: React.FC<{
     )
 }
 
-const ProfilePage: React.FC<{ data: DashboardData }> = ({ data }) => {
+const ProfilePage: React.FC<{ data: DashboardData, onAnalyze: () => void }> = ({ data, onAnalyze }) => {
     return (
         <div className="p-4 space-y-4">
             <h2 className="text-xl font-semibold text-gray-800">Company Dashboard</h2>
@@ -411,6 +517,10 @@ const ProfilePage: React.FC<{ data: DashboardData }> = ({ data }) => {
             </div>
              <div className="bg-white p-4 rounded-lg shadow space-y-2"><h3 className="text-lg font-semibold">Expenses</h3><div className="flex justify-between"><span className="text-gray-600">Today's Expense</span><span className="font-medium text-red-600">{formatCurrency(data.todayExpense)}</span></div><div className="flex justify-between"><span className="text-gray-600">This Month's Expense</span><span className="font-medium text-red-700">{formatCurrency(data.monthExpense)}</span></div></div>
              <div className="bg-white p-4 rounded-lg shadow space-y-2"><h3 className="text-lg font-semibold">Activity Today</h3><div className="flex justify-between"><span className="text-gray-600">Workers Active Today</span><span className="font-medium text-teal-600">{data.todayWorkers}</span></div><div className="flex justify-between"><span className="text-gray-600">Material Items Used</span><span className="font-medium text-teal-600">{data.todayMaterials}</span></div></div>
+             <button onClick={onAnalyze} className="w-full bg-blue-600 text-white py-3 rounded-lg font-medium flex items-center justify-center">
+                <SparklesIcon className="w-5 h-5 mr-2" />
+                Analyze Expenses with AI
+             </button>
         </div>
     );
 }
@@ -427,7 +537,7 @@ const Tabs: React.FC<{ items: string[], selected: string, onSelect: (item: strin
     </nav>
 );
 
-// --- MODALS ---
+// --- MODALS & AI COMPONENTS ---
 
 const Modal: React.FC<{ title: string; isOpen: boolean; onClose: () => void; children: React.ReactNode }> = ({ title, isOpen, onClose, children }) => {
     if (!isOpen) return null;
@@ -442,6 +552,86 @@ const Modal: React.FC<{ title: string; isOpen: boolean; onClose: () => void; chi
     );
 };
 
+const AddSiteModalContent: React.FC<{
+    handleSubmit: (e: React.FormEvent, apiCall: () => Promise<any>, successMsg: string) => Promise<void>;
+}> = ({ handleSubmit }) => {
+    const [location, setLocation] = useState('');
+    const [supplierInfo, setSupplierInfo] = useState<{ text: string, links: { uri: string, title: string }[] }>({ text: '', links: [] });
+    const [isFinding, setFinding] = useState(false);
+
+    const handleFindSuppliers = async () => {
+        if (!location) return;
+        setFinding(true);
+        setSupplierInfo({ text: '', links: [] });
+        try {
+            const position = await new Promise<GeolocationPosition>((resolve, reject) => {
+                navigator.geolocation.getCurrentPosition(resolve, reject, { timeout: 5000 });
+            });
+            const { latitude, longitude } = position.coords;
+
+            const response = await ai.models.generateContent({
+                model: 'gemini-2.5-flash',
+                contents: `Find construction material suppliers near ${location}.`,
+                config: {
+                    tools: [{ googleMaps: {} }],
+                    toolConfig: { retrievalConfig: { latLng: { latitude, longitude } } }
+                }
+            });
+
+            const groundingChunks = response.candidates?.[0]?.groundingMetadata?.groundingChunks || [];
+            const links = groundingChunks
+                .filter(chunk => chunk.maps?.uri)
+                .map(chunk => ({ uri: chunk.maps.uri, title: chunk.maps.title || 'View on Map' }));
+
+            setSupplierInfo({ text: response.text, links });
+        } catch (err) {
+            console.error(err);
+            setSupplierInfo({ text: 'Could not find suppliers. Please check location or try again.', links: [] });
+        } finally {
+            setFinding(false);
+        }
+    };
+    
+    return (
+        <form onSubmit={(e) => {
+            const data = new FormData(e.currentTarget);
+            handleSubmit(e, () => api.addNewSite({
+                SiteName: data.get('SiteName') as string,
+                Location: data.get('Location') as string,
+                OwnerName: data.get('OwnerName') as string,
+                OwnerContact: data.get('OwnerContact') as string,
+                Budget: Number(data.get('Budget')),
+                TotalArea: data.get('TotalArea') as string
+            }), 'Site added successfully!');
+        }} className="space-y-4">
+            <input name="SiteName" className="w-full px-4 py-3 border border-gray-300 rounded-lg" placeholder="Site Name" required />
+            <div className="relative">
+                <input name="Location" value={location} onChange={(e) => setLocation(e.target.value)} className="w-full px-4 py-3 border border-gray-300 rounded-lg" placeholder="Location" required />
+                <button type="button" onClick={handleFindSuppliers} disabled={isFinding || !location} className="absolute right-2 top-1/2 -translate-y-1/2 text-xs bg-blue-100 text-blue-700 px-2 py-1 rounded disabled:opacity-50">
+                    {isFinding ? 'Finding...' : 'Find Suppliers'}
+                </button>
+            </div>
+            {supplierInfo.text && (
+                <div className="text-sm bg-gray-100 p-3 rounded-lg">
+                    <p className="font-semibold">Nearby Suppliers:</p>
+                    <p>{supplierInfo.text}</p>
+                    {supplierInfo.links.map(link => (
+                        <a key={link.uri} href={link.uri} target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:underline block truncate">
+                           - {link.title}
+                        </a>
+                    ))}
+                </div>
+            )}
+            <input name="OwnerName" className="w-full px-4 py-3 border border-gray-300 rounded-lg" placeholder="Owner Name" required />
+            <input name="OwnerContact" className="w-full px-4 py-3 border border-gray-300 rounded-lg" placeholder="Owner Contact" type="tel" required />
+            <input name="Budget" className="w-full px-4 py-3 border border-gray-300 rounded-lg" placeholder="Budget (₹)" type="number" required />
+            <input name="TotalArea" className="w-full px-4 py-3 border border-gray-300 rounded-lg" placeholder="Total Area (e.g., 2400 sqft)" required />
+            <button type="submit" className="w-full bg-teal-600 text-white py-3 rounded-lg font-medium">Add Site</button>
+        </form>
+    );
+}
+
+
 const ModalManager: React.FC<{
     activeModal: ModalType,
     setActiveModal: (modal: ModalType) => void;
@@ -450,7 +640,9 @@ const ModalManager: React.FC<{
     showToast: (msg: string, type?: 'success'|'error') => void;
     workers: Worker[];
     materials: Material[];
-}> = ({ activeModal, setActiveModal, onUpdate, currentSiteId, showToast, workers, materials }) => {
+    aiAnalysisResult: string | null;
+    isAiLoading: boolean;
+}> = ({ activeModal, setActiveModal, onUpdate, currentSiteId, showToast, aiAnalysisResult, isAiLoading }) => {
     const handleClose = () => setActiveModal(null);
     const formRef = useRef<HTMLFormElement>(null);
     
@@ -475,26 +667,7 @@ const ModalManager: React.FC<{
     return (
         <>
             <Modal title="Add New Site" isOpen={activeModal === 'add-site'} onClose={handleClose}>
-                <form ref={formRef} onSubmit={(e) => {
-                    const data = new FormData(e.currentTarget);
-                    handleSubmit(e, () => api.addNewSite({
-                        SiteName: data.get('SiteName') as string,
-                        Location: data.get('Location') as string,
-                        OwnerName: data.get('OwnerName') as string,
-                        OwnerContact: data.get('OwnerContact') as string,
-                        Budget: Number(data.get('Budget')),
-                        TotalArea: data.get('TotalArea') as string
-                    }), 'Site added successfully!');
-                }} className="space-y-4">
-                    <input name="SiteName" className="w-full px-4 py-3 border border-gray-300 rounded-lg" placeholder="Site Name" required />
-                    <input name="Location" className="w-full px-4 py-3 border border-gray-300 rounded-lg" placeholder="Location" required />
-                    <input name="OwnerName" className="w-full px-4 py-3 border border-gray-300 rounded-lg" placeholder="Owner Name" required />
-                    <input name="OwnerContact" className="w-full px-4 py-3 border border-gray-300 rounded-lg" placeholder="Owner Contact" type="tel" required />
-                    <input name="Budget" className="w-full px-4 py-3 border border-gray-300 rounded-lg" placeholder="Budget (₹)" type="number" required />
-                    <input name="TotalArea" className="w-full px-4 py-3 border border-gray-300 rounded-lg" placeholder="Total Area (e.g., 2400 sqft)" required />
-                    <button type="submit" className="w-full bg-teal-600 text-white py-3 rounded-lg font-medium">Add Site</button>
-                    <button type="button" onClick={handleClose} className="w-full bg-gray-200 text-gray-800 py-3 rounded-lg font-medium">Cancel</button>
-                </form>
+               <AddSiteModalContent handleSubmit={handleSubmit} />
             </Modal>
             
             <Modal title="Add Daily Log" isOpen={activeModal === 'add-daily-log'} onClose={handleClose}>
@@ -528,6 +701,82 @@ const ModalManager: React.FC<{
                     <button type="button" onClick={handleClose} className="w-full bg-gray-200 text-gray-800 py-3 rounded-lg font-medium">Cancel</button>
                 </form>
             </Modal>
+             <Modal title="AI Expense Analysis" isOpen={activeModal === 'ai-analysis'} onClose={handleClose}>
+                <div>
+                    {isAiLoading && <div className="flex justify-center items-center h-40"><div className="w-8 h-8 border-2 border-blue-500 border-t-transparent rounded-full animate-spin"></div></div>}
+                    {aiAnalysisResult && (
+                        <div className="prose prose-sm max-w-none" dangerouslySetInnerHTML={{ __html: aiAnalysisResult.replace(/\*/g, '•') }}></div>
+                    )}
+                     <button type="button" onClick={handleClose} className="w-full bg-gray-200 text-gray-800 py-3 rounded-lg font-medium mt-4">Close</button>
+                </div>
+            </Modal>
         </>
+    );
+};
+
+const ChatBot: React.FC<{ isOpen: boolean; onClose: () => void; history: ChatMessage[]; onSendMessage: (msg: string) => void; isLoading: boolean }> = ({ isOpen, onClose, history, onSendMessage, isLoading }) => {
+    const [input, setInput] = useState('');
+    const chatBodyRef = useRef<HTMLDivElement>(null);
+
+    useEffect(() => {
+        if (chatBodyRef.current) {
+            chatBodyRef.current.scrollTop = chatBodyRef.current.scrollHeight;
+        }
+    }, [history, isLoading]);
+
+    const handleSubmit = (e: React.FormEvent) => {
+        e.preventDefault();
+        if (input.trim() && !isLoading) {
+            onSendMessage(input.trim());
+            setInput('');
+        }
+    };
+    
+    if (!isOpen) return null;
+
+    return (
+        <div className="fixed inset-0 z-40 flex flex-col justify-end">
+            <div className="absolute inset-0 bg-black bg-opacity-40" onClick={onClose}></div>
+            <div className="relative bg-white h-[85vh] w-full rounded-t-2xl shadow-2xl flex flex-col">
+                <header className="flex items-center justify-between p-4 border-b">
+                    <h3 className="text-lg font-bold text-gray-800">Construction Assistant</h3>
+                    <button onClick={onClose} className="p-2 rounded-full hover:bg-gray-100">
+                        <CloseIcon className="w-6 h-6 text-gray-600" />
+                    </button>
+                </header>
+                <div ref={chatBodyRef} className="flex-1 overflow-y-auto p-4 space-y-4">
+                    {history.map((msg, index) => (
+                        <div key={index} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
+                            <div className={`max-w-xs md:max-w-md lg:max-w-lg p-3 rounded-2xl ${msg.role === 'user' ? 'bg-blue-600 text-white rounded-br-none' : 'bg-gray-200 text-gray-800 rounded-bl-none'}`}>
+                                {msg.parts[0].text}
+                            </div>
+                        </div>
+                    ))}
+                    {isLoading && (
+                         <div className="flex justify-start">
+                             <div className="max-w-xs p-3 rounded-2xl bg-gray-200 text-gray-800 rounded-bl-none">
+                                <div className="flex items-center space-x-1">
+                                    <span className="w-2 h-2 bg-gray-400 rounded-full animate-pulse"></span>
+                                    <span className="w-2 h-2 bg-gray-400 rounded-full animate-pulse delay-75"></span>
+                                    <span className="w-2 h-2 bg-gray-400 rounded-full animate-pulse delay-150"></span>
+                                </div>
+                             </div>
+                         </div>
+                    )}
+                </div>
+                <form onSubmit={handleSubmit} className="p-4 border-t flex items-center space-x-2 bg-white">
+                    <input 
+                        type="text" 
+                        value={input}
+                        onChange={(e) => setInput(e.target.value)}
+                        placeholder="Ask anything..." 
+                        className="flex-1 px-4 py-2 border border-gray-300 rounded-full focus:outline-none focus:ring-2 focus:ring-blue-500"
+                    />
+                    <button type="submit" disabled={isLoading} className="bg-blue-600 text-white w-10 h-10 rounded-full flex items-center justify-center disabled:bg-blue-400">
+                        <SendIcon className="w-5 h-5" />
+                    </button>
+                </form>
+            </div>
+        </div>
     );
 };
